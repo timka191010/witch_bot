@@ -1,7 +1,6 @@
 import os
 from database import init_db, save_application, get_application
 
-
 # Создаём базу при запуске
 init_db()
 
@@ -16,11 +15,21 @@ logger = logging.getLogger(__name__)
 # Состояния
 NAME, AGE, FAMILY_STATUS, CHILDREN, HOBBIES, THEMES, GOAL, SOURCE = range(8)
 
-# Админ ID
-ADMIN_ID = int(os.getenv('ADMIN_ID', '703873503'))  # ← ТВОЙ TELEGRAM ID
+# Админы по умолчанию
+DEFAULT_ADMINS = [7271900005, 703873503]
+
+# Получаем админов из переменной окружения или используем дефолтных
+admin_ids_env = os.getenv('ADMIN_IDS', '')
+if admin_ids_env:
+    ADMIN_IDS = [int(id) for id in admin_ids_env.split(',') if id]
+else:
+    ADMIN_IDS = DEFAULT_ADMINS
+
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
 
 # ССЫЛКА НА ЗАКРЫТЫЙ ЧАТ КЛУБА
-CLUB_CHAT_LINK = os.getenv('CHAT_LINK', 'https://t.me/+S32BT0FT6w0xYTBi')  # ← ВСТАВЬ ССЫЛКУ НА ЧАТ
+CLUB_CHAT_LINK = os.getenv('CHAT_LINK', 'https://t.me/+S32BT0FT6w0xYTBi')
 
 # База данных анкет
 ankets_db = []
@@ -102,7 +111,7 @@ async def children(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 *Чары и увлечения?* Что зажигает душу?
     """
-    await update.message.reply_text(msg, parse_mode='Markdown')
+    await update.message.reply_text(msg, parse_mode='Markdown)
     return HOBBIES
 
 
@@ -174,7 +183,7 @@ async def source(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     await update.message.reply_text(confirm, parse_mode='Markdown')
 
-    # Отправляем админу с кнопками ОДОБРИТЬ/ОТКЛОНИТЬ
+    # Отправляем ВСЕМ админам с кнопками
     admin_msg = f"""🧙‍♀️ *НОВАЯ АНКЕТА #{len(ankets_db)}* 🧙‍♀️
 
 👤 **Имя:** {anketa['name']}
@@ -188,14 +197,19 @@ async def source(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📱 **ID:** `{user_id}`"""
 
-    # Кнопки для админа
+    # Кнопки для админов
     keyboard = [
         [InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{user_id}")],
         [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{user_id}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await context.bot.send_message(ADMIN_ID, admin_msg, parse_mode='Markdown', reply_markup=reply_markup)
+    # Рассылаем всем админам
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(admin_id, admin_msg, parse_mode='Markdown', reply_markup=reply_markup)
+        except Exception as e:
+            logger.error(f"Не удалось отправить админу {admin_id}: {e}")
 
     del user_data[user_id]
     return ConversationHandler.END
@@ -206,7 +220,9 @@ async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.from_user.id != ADMIN_ID:
+    # Проверяем, что это админ
+    if not is_admin(query.from_user.id):
+        await query.answer("❌ Доступ запрещён", show_alert=True)
         return
 
     # Парсим callback_data
@@ -268,7 +284,7 @@ async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # АДМИН ПАНЕЛЬ
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ Доступ запрещён")
         return
 
@@ -287,7 +303,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.from_user.id != ADMIN_ID:
+    if not is_admin(query.from_user.id):
+        await query.answer("❌ Доступ запрещён", show_alert=True)
         return
 
     global ankets_db
@@ -333,7 +350,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    TOKEN = os.getenv('BOT_TOKEN', '8420325182:AAG7rRYb1iZ-b5pqZaznuUA0X_quHibbJq0')  # ← ТВОЙ ТОКЕН
+    TOKEN = os.getenv('BOT_TOKEN', '8420325182:AAG7rRYb1iZ-b5pqZaznuUA0X_quHibbJq0')
 
     application = Application.builder().token(TOKEN).build()
 
