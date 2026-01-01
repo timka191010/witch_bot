@@ -1,6 +1,8 @@
 import os
 from database import init_db, save_application, get_application
 from datetime import datetime
+import asyncio
+from aiohttp import web
 
 # Создаём базу при запуске
 init_db()
@@ -79,6 +81,22 @@ def get_upcoming_birthdays(ankets_db, limit=5):
     birthdays.sort(key=lambda x: x['days_until'])
     
     return birthdays[:limit]
+
+
+async def health_check(request):
+    return web.Response(text="OK")
+
+
+async def run_health_server():
+    """Запускает HTTP-сервер для Render"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv('PORT', 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"🌐 Health server running on port {port}")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -463,6 +481,11 @@ def main():
     application.add_handler(CallbackQueryHandler(approval_callback, pattern='^(approve|reject)_'))
 
     print("🤖 Бот Ведьм запущен!")
+    
+    # Запускаем HTTP-сервер параллельно
+    loop = asyncio.get_event_loop()
+    loop.create_task(run_health_server())
+    
     application.run_polling()
 
 
