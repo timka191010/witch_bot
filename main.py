@@ -111,7 +111,7 @@ async def children(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 *Чары и увлечения?* Что зажигает душу?
     """
-    await update.message.reply_text(msg, parse_mode='Markdown)
+    await update.message.reply_text(msg, parse_mode='Markdown')
     return HOBBIES
 
 
