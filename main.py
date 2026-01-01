@@ -1,5 +1,6 @@
 import os
 from database import init_db, save_application, get_application
+from datetime import datetime
 
 # Создаём базу при запуске
 init_db()
@@ -36,6 +37,50 @@ ankets_db = []
 user_data = {}
 
 
+def get_upcoming_birthdays(ankets_db, limit=5):
+    """Находит ближайшие дни рождения"""
+    today = datetime.today()
+    birthdays = []
+    
+    for ank in ankets_db:
+        try:
+            # Пробуем парсить разные форматы даты
+            birth_str = ank['age'].strip()
+            birth_date = None
+            
+            for fmt in ['%d.%m.%Y', '%d/%m/%Y', '%d-%m-%Y', '%d.%m.%y', '%d/%m/%y']:
+                try:
+                    birth_date = datetime.strptime(birth_str, fmt)
+                    break
+                except:
+                    continue
+            
+            if birth_date:
+                # Вычисляем следующий день рождения
+                next_birthday = birth_date.replace(year=today.year)
+                
+                # Если ДР уже прошёл в этом году, берём следующий год
+                if next_birthday < today:
+                    next_birthday = birth_date.replace(year=today.year + 1)
+                
+                days_until = (next_birthday - today).days
+                age = today.year - birth_date.year
+                
+                birthdays.append({
+                    'name': ank['name'],
+                    'date': birth_date.strftime('%d.%m'),
+                    'days_until': days_until,
+                    'age': age
+                })
+        except:
+            continue
+    
+    # Сортируем по количеству дней до ДР
+    birthdays.sort(key=lambda x: x['days_until'])
+    
+    return birthdays[:limit]
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data[user_id] = {}
@@ -60,7 +105,7 @@ async def name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = """
 🔮 *Имя, полное магии...* 🔮
 
-Раскрой тайну **даты своего рождения (число, месяц, год)**:
+Раскрой тайну **даты своего рождения (ДД.ММ.ГГГГ обязательно в таком формате!)**:
     """
     await update.message.reply_text(msg, parse_mode='Markdown')
     return AGE
@@ -234,7 +279,7 @@ async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         approval_msg = f"""
 🌟 *Поздравляю, сестра!* 🌟
 
-Ковен *ВЕДЬМЫ НЕ СТАРЕЮТ* принял тебя в свой круг! 
+Клуб *ВЕДЬМЫ НЕ СТАРЕЮТ* принял тебя в свой круг! 
 
 Твоя магия достойна нашего сообщества. Переходи по ссылке и присоединяйся к нам:
 
@@ -260,7 +305,7 @@ async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rejection_msg = """
 🌙 *Дорогая странница...* 🌙
 
-Ковен *ВЕДЬМЫ НЕ СТАРЕЮТ* благодарит тебя за интерес к нашему сообществу.
+Клуб *ВЕДЬМЫ НЕ СТАРЕЮТ* благодарит тебя за интерес к нашему сообществу.
 
 К сожалению, в данный момент мы не можем принять твою заявку. Но не расстраивайся — каждая ведьма находит свой путь в своё время. 
 
@@ -284,19 +329,29 @@ async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # АДМИН ПАНЕЛЬ
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Доступ запрещён")
+    user_id = update.effective_user.id if update.message else update.callback_query.from_user.id
+    
+    if not is_admin(user_id):
+        if update.message:
+            await update.message.reply_text("❌ Доступ запрещён")
+        else:
+            await update.callback_query.answer("❌ Доступ запрещён", show_alert=True)
         return
 
     keyboard = [
         [InlineKeyboardButton("📋 Все анкеты", callback_data="all_ankets")],
-        [InlineKeyboardButton("🗑️ Очистить базу", callback_data="clear_db")],
-        [InlineKeyboardButton("📊 Статистика", callback_data="stats")]
+        [InlineKeyboardButton("📊 Статистика", callback_data="stats")],
+        [InlineKeyboardButton("🎂 Ближайшие ДР", callback_data="upcoming_birthdays")],
+        [InlineKeyboardButton("🗑️ Очистить базу", callback_data="clear_db")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text("🧙‍♀️ *АДМИН ПАНЕЛЬ ВЕДЬМ* 🧙‍♀️",
-                                    parse_mode='Markdown', reply_markup=reply_markup)
+    admin_text = "🧙‍♀️ *АДМИН ПАНЕЛЬ ВЕДЬМ* 🧙‍♀️"
+
+    if update.message:
+        await update.message.reply_text(admin_text, parse_mode='Markdown', reply_markup=reply_markup)
+    else:
+        await update.callback_query.edit_message_text(admin_text, parse_mode='Markdown', reply_markup=reply_markup)
 
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -309,7 +364,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     global ankets_db
 
-    if query.data == "all_ankets":
+    # Кнопка "Назад" для всех экранов
+    back_button = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_admin")]]
+
+    if query.data == "back_to_admin":
+        await admin_panel(update, context)
+        return
+
+    elif query.data == "all_ankets":
         if not ankets_db:
             msg = "📭 *Анкет пока нет*"
         else:
@@ -318,29 +380,55 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg += f"**#{len(ankets_db) - 10 + i}** {ank['name']} ({ank['age']})\n"
                 msg += f"💍 {ank['family_status']} | 🌟 {ank['source']}\n\n"
 
-        await query.edit_message_text(msg, parse_mode='Markdown')
+        reply_markup = InlineKeyboardMarkup(back_button)
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
 
     elif query.data == "clear_db":
         count = len(ankets_db)
         ankets_db.clear()
-        await query.edit_message_text(f"🧹 *База очищена! Удалено {count} анкет*", parse_mode='Markdown')
+        msg = f"🧹 *База очищена! Удалено {count} анкет*"
+        reply_markup = InlineKeyboardMarkup(back_button)
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
 
     elif query.data == "stats":
         if not ankets_db:
-            await query.edit_message_text("📭 *Нет данных для статистики*", parse_mode='Markdown')
-            return
+            msg = "📭 *Нет данных для статистики*"
+        else:
+            total = len(ankets_db)
+            married = sum(1 for a in ankets_db if 'Замужем' in a['family_status'])
+            kids = sum(1 for a in ankets_db if 'нет детей' not in str(a['children']).lower())
 
-        total = len(ankets_db)
-        married = sum(1 for a in ankets_db if 'Замужем' in a['family_status'])
-        kids = sum(1 for a in ankets_db if 'нет детей' not in str(a['children']).lower())
-
-        msg = f"""
+            msg = f"""
 📊 *СТАТИСТИКА КЛУБА* 📊
 👥 Всего анкет: **{total}**
 💍 Замужем: **{married}** ({married / total * 100:.0f}%)
 👶 С детьми: **{kids}** ({kids / total * 100:.0f}%)
-        """
-        await query.edit_message_text(msg, parse_mode='Markdown')
+            """
+        
+        reply_markup = InlineKeyboardMarkup(back_button)
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
+
+    elif query.data == "upcoming_birthdays":
+        if not ankets_db:
+            msg = "📭 *Анкет пока нет*"
+        else:
+            birthdays = get_upcoming_birthdays(ankets_db, limit=10)
+            
+            if not birthdays:
+                msg = "🎂 *Не удалось распознать даты рождения*\n\nПроверьте формат: ДД.ММ.ГГГГ"
+            else:
+                msg = "🎂 *БЛИЖАЙШИЕ ДНИ РОЖДЕНИЯ* 🎂\n\n"
+                
+                for i, bd in enumerate(birthdays, 1):
+                    if bd['days_until'] == 0:
+                        msg += f"🎉 **{bd['name']}** — *СЕГОДНЯ!* ({bd['date']}, {bd['age']} лет)\n\n"
+                    elif bd['days_until'] == 1:
+                        msg += f"🎈 **{bd['name']}** — *завтра* ({bd['date']}, {bd['age']} лет)\n\n"
+                    else:
+                        msg += f"{i}. **{bd['name']}** — через {bd['days_until']} дн. ({bd['date']}, {bd['age']} лет)\n\n"
+        
+        reply_markup = InlineKeyboardMarkup(back_button)
+        await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -371,7 +459,7 @@ def main():
 
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler('admin', admin_panel))
-    application.add_handler(CallbackQueryHandler(admin_callback, pattern='^(all_ankets|clear_db|stats)$'))
+    application.add_handler(CallbackQueryHandler(admin_callback, pattern='^(all_ankets|clear_db|stats|upcoming_birthdays|back_to_admin)$'))
     application.add_handler(CallbackQueryHandler(approval_callback, pattern='^(approve|reject)_'))
 
     print("🤖 Бот Ведьм запущен!")
