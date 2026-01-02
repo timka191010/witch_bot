@@ -1,8 +1,12 @@
 import os
-from database import init_db, save_application, get_application
+from database import init_db, save_application, get_all_applications, clear_all_applications, get_application
 from datetime import datetime
 import asyncio
 from aiohttp import web
+import signal
+import sys
+from threading import Thread
+import time
 
 # Создаём базу при запуске
 init_db()
@@ -34,17 +38,51 @@ def is_admin(user_id):
 # ССЫЛКА НА ЗАКРЫТЫЙ ЧАТ КЛУБА
 CLUB_CHAT_LINK = os.getenv('CHAT_LINK', 'https://t.me/+S32BT0FT6w0xYTBi')
 
-# База данных анкет
-ankets_db = []
+# База данных анкет - теперь в PostgreSQL
 user_data = {}
 
 
-def get_upcoming_birthdays(ankets_db, limit=5):
+class PollingWatchdog:
+    """Следит за активностью polling и перезапускает при зависании"""
+    def __init__(self, timeout=300):  # 5 минут без активности = перезапуск
+        self.timeout = timeout
+        self.last_update = time.time()
+        self.running = True
+        
+    def reset(self):
+        """Сбрасывает таймер при получении обновления"""
+        self.last_update = time.time()
+        
+    def check(self):
+        """Проверяет, не завис ли polling"""
+        while self.running:
+            time.sleep(60)  # Проверяем каждую минуту
+            elapsed = time.time() - self.last_update
+            if elapsed > self.timeout:
+                logger.error(f"⚠️ Polling завис! Нет активности {int(elapsed)} секунд. Перезапускаем...")
+                os._exit(1)  # Принудительный выход — Render автоматически перезапустит
+
+
+watchdog = PollingWatchdog(timeout=300)  # 5 минут
+
+
+def signal_handler(sig, frame):
+    """Обработчик для graceful shutdown"""
+    logger.info("🛑 Получен сигнал остановки")
+    watchdog.running = False
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+
+def get_upcoming_birthdays(ankets, limit=5):
     """Находит ближайшие дни рождения"""
     today = datetime.today()
     birthdays = []
     
-    for ank in ankets_db:
+    for ank in ankets:
         try:
             # Пробуем парсить разные форматы даты
             birth_str = ank['age'].strip()
@@ -97,6 +135,11 @@ async def run_health_server():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     print(f"🌐 Health server running on port {port}")
+
+
+async def watchdog_updater(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обновляет watchdog при каждом сообщении"""
+    watchdog.reset()
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -233,7 +276,13 @@ async def source(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'goal': user_data[user_id]['goal'],
         'source': user_data[user_id]['source']
     }
-    ankets_db.append(anketa)
+    
+    # Сохраняем в базу данных PostgreSQL
+    save_application(anketa)
+    
+    # Получаем номер анкеты
+    all_ankets = get_all_applications()
+    anketa_number = len(all_ankets)
 
     # Подтверждение пользователю
     confirm = """
@@ -247,7 +296,7 @@ async def source(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(confirm, parse_mode='Markdown')
 
     # Отправляем ВСЕМ админам с кнопками
-    admin_msg = f"""🧙‍♀️ *НОВАЯ АНКЕТА #{len(ankets_db)}* 🧙‍♀️
+    admin_msg = f"""🧙‍♀️ *НОВАЯ АНКЕТА #{anketa_number}* 🧙‍♀️
 
 👤 **Имя:** {anketa['name']}
 🕯️ **Дата рождения:** {anketa['age']}
@@ -380,8 +429,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("❌ Доступ запрещён", show_alert=True)
         return
 
-    global ankets_db
-
     # Кнопка "Назад" для всех экранов
     back_button = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_admin")]]
 
@@ -390,31 +437,37 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif query.data == "all_ankets":
-        if not ankets_db:
+        ankets = get_all_applications()  # Загружаем из базы данных
+        
+        if not ankets:
             msg = "📭 *Анкет пока нет*"
         else:
-            msg = f"🧙‍♀️ *ВСЕ АНКЕТЫ ({len(ankets_db)})* 🧙‍♀️\n\n"
-            for i, ank in enumerate(ankets_db[-10:], 1):
-                msg += f"**#{len(ankets_db) - 10 + i}** {ank['name']} ({ank['age']})\n"
+            msg = f"🧙‍♀️ *ВСЕ АНКЕТЫ ({len(ankets)})* 🧙‍♀️\n\n"
+            # Показываем последние 10 анкет
+            for ank in ankets[:10]:
+                msg += f"**#{ank['id']}** {ank['name']} ({ank['age']})\n"
                 msg += f"💍 {ank['family_status']} | 🌟 {ank['source']}\n\n"
 
         reply_markup = InlineKeyboardMarkup(back_button)
         await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
 
     elif query.data == "clear_db":
-        count = len(ankets_db)
-        ankets_db.clear()
+        ankets = get_all_applications()
+        count = len(ankets)
+        clear_all_applications()  # Очищаем базу данных
         msg = f"🧹 *База очищена! Удалено {count} анкет*"
         reply_markup = InlineKeyboardMarkup(back_button)
         await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
 
     elif query.data == "stats":
-        if not ankets_db:
+        ankets = get_all_applications()  # Загружаем из базы данных
+        
+        if not ankets:
             msg = "📭 *Нет данных для статистики*"
         else:
-            total = len(ankets_db)
-            married = sum(1 for a in ankets_db if 'Замужем' in a['family_status'])
-            kids = sum(1 for a in ankets_db if 'нет детей' not in str(a['children']).lower())
+            total = len(ankets)
+            married = sum(1 for a in ankets if 'Замужем' in a['family_status'])
+            kids = sum(1 for a in ankets if 'нет детей' not in str(a['children']).lower())
 
             msg = f"""
 📊 *СТАТИСТИКА КЛУБА* 📊
@@ -427,10 +480,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
 
     elif query.data == "upcoming_birthdays":
-        if not ankets_db:
+        ankets = get_all_applications()  # Загружаем из базы данных
+        
+        if not ankets:
             msg = "📭 *Анкет пока нет*"
         else:
-            birthdays = get_upcoming_birthdays(ankets_db, limit=10)
+            birthdays = get_upcoming_birthdays(ankets, limit=10)
             
             if not birthdays:
                 msg = "🎂 *Не удалось распознать даты рождения*\n\nПроверьте формат: ДД.ММ.ГГГГ"
@@ -479,14 +534,32 @@ def main():
     application.add_handler(CommandHandler('admin', admin_panel))
     application.add_handler(CallbackQueryHandler(admin_callback, pattern='^(all_ankets|clear_db|stats|upcoming_birthdays|back_to_admin)$'))
     application.add_handler(CallbackQueryHandler(approval_callback, pattern='^(approve|reject)_'))
+    
+    # Добавляем watchdog handler для всех сообщений
+    application.add_handler(MessageHandler(filters.ALL, watchdog_updater), group=999)
 
     print("🤖 Бот Ведьм запущен!")
+    print("🐕 Watchdog активирован - автоперезапуск при зависании")
+    
+    # Запускаем watchdog в отдельном потоке
+    watchdog_thread = Thread(target=watchdog.check, daemon=True)
+    watchdog_thread.start()
     
     # Запускаем HTTP-сервер параллельно
     loop = asyncio.get_event_loop()
     loop.create_task(run_health_server())
     
-    application.run_polling()
+    # Сбрасываем watchdog при старте
+    watchdog.reset()
+    
+    # Запускаем polling с увеличенными таймаутами
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        pool_timeout=30,
+        read_timeout=30,
+        write_timeout=30,
+        connect_timeout=30
+    )
 
 
 if __name__ == '__main__':
