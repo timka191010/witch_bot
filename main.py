@@ -1,6 +1,6 @@
 import os
 from database import init_db, save_application, get_all_applications, clear_all_applications, get_application
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
 from aiohttp import web
 import signal
@@ -78,16 +78,19 @@ signal.signal(signal.SIGTERM, signal_handler)
 
 
 def get_upcoming_birthdays(ankets, limit=5):
-    """Находит ближайшие дни рождения"""
-    today = datetime.today()
+    """Находит ближайшие дни рождения (МСК timezone UTC+3)"""
+    # Используем UTC+3 (Moscow timezone)
+    msk_tz = timedelta(hours=3)
+    today = (datetime.utcnow() + msk_tz).date()
+    
     birthdays = []
     
     for ank in ankets:
         try:
-            # Пробуем парсить разные форматы даты
             birth_str = ank['age'].strip()
             birth_date = None
             
+            # Пробуем парсить разные форматы даты
             for fmt in ['%d.%m.%Y', '%d/%m/%Y', '%d-%m-%Y', '%d.%m.%y', '%d/%m/%y']:
                 try:
                     birth_date = datetime.strptime(birth_str, fmt)
@@ -100,11 +103,11 @@ def get_upcoming_birthdays(ankets, limit=5):
                 next_birthday = birth_date.replace(year=today.year)
                 
                 # Если ДР уже прошёл в этом году, берём следующий год
-                if next_birthday < today:
+                if next_birthday.date() < today:
                     next_birthday = birth_date.replace(year=today.year + 1)
                 
-                days_until = (next_birthday - today).days
-                age = today.year - birth_date.year
+                days_until = (next_birthday.date() - today).days
+                age = next_birthday.year - birth_date.year
                 
                 birthdays.append({
                     'name': ank['name'],
@@ -112,7 +115,8 @@ def get_upcoming_birthdays(ankets, limit=5):
                     'days_until': days_until,
                     'age': age
                 })
-        except:
+        except Exception as e:
+            logger.error(f"Ошибка парсинга даты для {ank.get('name', 'Unknown')}: {e}")
             continue
     
     # Сортируем по количеству дней до ДР
@@ -498,7 +502,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     elif bd['days_until'] == 1:
                         msg += f"🎈 **{bd['name']}** — *завтра* ({bd['date']}, {bd['age']} лет)\n\n"
                     else:
-                        msg += f"{i}. **{bd['name']}** — через {bd['days_until']} дн. ({bd['date']}, {bd['age']} лет)\n\n"
+                        msg += f"{i}. **{bd['name']}** — через {bd['days_until']} дн. ({bd['date']}, будет {bd['age']} лет)\n\n"
         
         reply_markup = InlineKeyboardMarkup(back_button)
         await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=reply_markup)
@@ -540,6 +544,7 @@ def main():
 
     print("🤖 Бот Ведьм запущен!")
     print("🐕 Watchdog активирован - автоперезапуск при зависании")
+    print("🕐 Timezone: UTC+3 (МСК)")
     
     # Запускаем watchdog в отдельном потоке
     watchdog_thread = Thread(target=watchdog.check, daemon=True)
